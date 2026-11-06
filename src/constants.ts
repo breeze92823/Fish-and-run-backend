@@ -102,4 +102,4 @@ export const DEV_ID_PREFIX = "dev-";
 // or carrying, the target not knocked, not hit in the last `immuneMs`, the attacker's last swing
 // at least `cooldownMs` ago. The victim then hands the stolen fish's weight over (`giveFish`)
 // within `giveMs`.
-export const BONK = { laneZ: -0.5, range: 4.2, slack: 3, cooldownMs: 550, immuneMs: 3500, giveMs: 4000 } as const;
+export const BONK = { laneZ: -0.5, range: 4.2, slack: 3, cooldownMs: 550, immuneMs: 600000, shieldMs: 300000, giveMs: 4000 } as const;

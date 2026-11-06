@@ -51,7 +51,11 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   // Bat bonks (bonk.ts): each session's last swing (ms), when it may be hit again (ms), and the
   // fish taken from it waiting for its weight (victim sessionId -> { by: attacker, species, at }).
   private lastSwing = new Map<string, number>();
-  private immuneUntil = new Map<string, number>();
+  // attacker sessionId -> (victim sessionId -> when the attacker may bonk that victim again, ms).
+  // Per pair: hitting one player locks only that player for BONK.immuneMs; others stay fair game.
+  private immuneUntil = new Map<string, Map<string, number>>();
+  // victim sessionId -> end of the short shield after being hit by anyone (BONK.shieldMs).
+  private shieldUntil = new Map<string, number>();
   private steals = new Map<string, { by: string; species: string; at: number }>();
 
   messages = {
@@ -160,8 +164,13 @@ export class WorldRoom extends Room<{ state: WorldState }> {
       const to = (msg as { target?: unknown })?.target;
       if (typeof to !== "string" || !to) return;
       const t = this.state.players.get(to);
-      if (bonkRefusal(a, t, now, this.immuneUntil.get(to) ?? 0, to === client.sessionId) || !t) return;
-      this.immuneUntil.set(to, now + BONK.immuneMs);
+      const mine = this.immuneUntil.get(client.sessionId) ?? new Map<string, number>();
+      // Locked by my own earlier hit on them (10 min) or by anyone's recent hit on them (short shield).
+      const until = Math.max(mine.get(to) ?? 0, this.shieldUntil.get(to) ?? 0);
+      if (bonkRefusal(a, t, now, until, to === client.sessionId) || !t) return;
+      mine.set(to, now + BONK.immuneMs);
+      this.shieldUntil.set(to, now + BONK.shieldMs);
+      this.immuneUntil.set(client.sessionId, mine);
       const fish = t.hold;
       if (fish) this.steals.set(to, { by: client.sessionId, species: fish, at: now });
       t.hold = ""; // gone from their hands at once, so nobody else can take it on the way
@@ -287,6 +296,8 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.spinStates.delete(sessionId);
     this.lastSwing.delete(sessionId);
     this.immuneUntil.delete(sessionId);
+    for (const m of this.immuneUntil.values()) m.delete(sessionId);
+    this.shieldUntil.delete(sessionId);
     this.steals.delete(sessionId);
   }
 
