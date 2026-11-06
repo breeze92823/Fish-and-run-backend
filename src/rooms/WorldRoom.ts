@@ -1,12 +1,16 @@
 import { Room, Client, CloseCode } from "colyseus";
 import { WorldState, PlayerState } from "./schema/WorldState.js";
-import { DISTANCE_MAX, GUEST_ID_PREFIX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS } from "../constants.js";
+import {
+  BONK, EVENT_EVERY_MS, GUEST_ID_PREFIX, LEADERBOARD_EVERY_MS, NAME_MAX, OFFLINE_MAX_SECONDS, OFFLINE_RATE, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS, UID_MAX_LEN, UPDATE_AT_MS,
+} from "../constants.js";
 import { getPlayers, type PlayerDoc } from "../db.js";
 import { sanitizeProgress } from "../sanitize.js";
 import { accrue, rollWedge, spinStateFrom, type SpinState } from "../spin.js";
 import { claimDaily, dailyFields, dailyView, readDaily, rollDaily, type DailyState } from "../daily.js";
-import { applyAvatar, applyLoadout, applyPose } from "../presence.js";
+import { applyAvatar, applyLoadout, applyPlot, applyPose, assignBase } from "../presence.js";
+import { bonkDirection, bonkRefusal, giveWeight } from "../bonk.js";
 import { ranksOf, topBoards } from "../leaderboard.js";
+import { queueScores } from "../platformBoards.js";
 
 function sanitizeName(raw: unknown): string {
   return typeof raw === "string" ? raw.slice(0, NAME_MAX) : "";
@@ -17,11 +21,13 @@ function sanitizePfp(raw: unknown): string {
 }
 
 /**
- * Room every client joins via `client.joinOrCreate("world", { userId, username })`. Loads and
- * saves each signed-in player's progress (MongoDB, see db.ts) -- the client keeps no save of its
- * own, so this is the only place progress lives. The game is client-authoritative: no gameplay
- * rules live here, saves are only bounded (sanitize.ts). Full rooms spill into a fresh one
- * automatically (maxClients).
+ * Room every client joins via `client.joinOrCreate("world", { userId, username, pfp, avatar, pose,
+ * loadout, base })`. At most ROOM_MAX_CLIENTS (= the hub's player plots) players: each owns one plot
+ * (`PlayerState.base`). Loads and saves each signed-in player's progress (MongoDB, see db.ts) -- the
+ * client keeps no save of its own, so this is the only place progress lives. The game is
+ * client-authoritative: no gameplay rules live here, saves are only bounded (sanitize.ts). Full rooms
+ * spill into a fresh one automatically (maxClients). The roster also carries what the others draw:
+ * every player's pose, Bloxity look, rod / trail / what is in hand, and the plot snapshot.
  */
 export class WorldRoom extends Room<{ state: WorldState }> {
   state = new WorldState();
@@ -42,6 +48,11 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   // sessionId -> Daily Reward state (daily.ts), read with the save. Guests and serverless sessions
   // keep theirs here only (like the rest of their progress, it lasts the session).
   private dailies = new Map<string, DailyState>();
+  // Bat bonks (bonk.ts): each session's last swing (ms), when it may be hit again (ms), and the
+  // fish taken from it waiting for its weight (victim sessionId -> { by: attacker, species, at }).
+  private lastSwing = new Map<string, number>();
+  private immuneUntil = new Map<string, number>();
+  private steals = new Map<string, { by: string; species: string; at: number }>();
 
   messages = {
     // Debounced push of the client's whole progress. Upserts, so a first save creates the document.
@@ -54,22 +65,31 @@ export class WorldRoom extends Room<{ state: WorldState }> {
       if (!userId) return;
       const players = getPlayers();
       if (!players) return; // Mongo unset/unreachable -- degrade silently
-      // The personal best only ever goes up ($max), so a stale or replayed save can't lower it.
-      const { bestDistance, ...rest } = patch;
+      // Lifetime counters only ever go up ($max), so a stale or replayed save can't lower a leaderboard place.
+      const { caught, earned, playtime, ...rest } = patch;
+      const max: Record<string, number> = {};
+      for (const [k, v] of Object.entries({ caught, earned, playtime })) if (v !== undefined) max[k] = v;
       try {
         await players.updateOne(
           { _id: userId },
           {
             // Display name comes from this connection's own PlayerState, not `msg`.
-            $set: { ...rest, username: p.username || "Player", updatedAt: new Date() },
-            ...(bestDistance !== undefined && { $max: { bestDistance } }),
+            $set: { ...rest, username: p.username || "Player", lastSeen: Date.now(), updatedAt: new Date() },
+            ...(Object.keys(max).length && { $max: max }),
             $setOnInsert: { version: 1 },
           },
           { upsert: true },
         );
       } catch (err) {
         console.warn("[WorldRoom] saveProgress failed", err);
+        return;
       }
+      // Bloxity's own trophy boards: the saved values (the lifetime ones only ever rise, 'best' mode).
+      queueScores(userId, {
+        ...(patch.income !== undefined && { income: patch.income }),
+        ...(caught !== undefined && { caught }),
+        ...(earned !== undefined && { earned }),
+      });
     },
     // Claims Daily Reward day `msg.day` (0-based). The server decides: answers `dailyResult`
     // { ok, day, ...state }; the client only grants the reward on ok.
@@ -106,17 +126,8 @@ export class WorldRoom extends Room<{ state: WorldState }> {
       client.send("spinResult", { ok: true, id: wedge.id, ...this.spinView(s, now) });
       await this.saveSpins(client.sessionId, s);
     },
-    // The sender's race, relayed through the roster so everyone draws them on the distance bar and
-    // podium: { racing, distance (studs this race) }, a few times a second while racing.
-    race: (client: Client, msg: { racing?: unknown; distance?: unknown }) => {
-      const p = this.state.players.get(client.sessionId);
-      if (!p) return;
-      p.racing = msg?.racing === true;
-      const d = msg?.distance;
-      p.distance = p.racing && typeof d === "number" && Number.isFinite(d) ? Math.min(DISTANCE_MAX, Math.max(0, d)) : 0;
-    },
-    // Presence (presence.ts): the sender's pose ~10x/s, its equipped gear and its Bloxity look,
-    // relayed through the roster so everyone draws them in the world (client remotePlayers.js).
+    // Presence (presence.ts): the sender's pose ~12x/s, its rod / trail / what is in hand and its
+    // Bloxity look, relayed through the roster so everyone draws it in the world.
     pose: (client: Client, msg: unknown) => {
       const p = this.state.players.get(client.sessionId);
       if (p) applyPose(p, msg);
@@ -128,6 +139,51 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     setAvatar: (client: Client, msg: unknown) => {
       const p = this.state.players.get(client.sessionId);
       if (p) applyAvatar(p, msg);
+    },
+    // The sender's plot (fish in the pool, treadmill) for the others to draw on its plot.
+    plot: (client: Client, msg: unknown) => {
+      const p = this.state.players.get(client.sessionId);
+      if (p) applyPlot(p, msg);
+    },
+    // Bat swing (loadout slot 2): `swing` { target?: sessionId }. Everyone else sees the swing
+    // (`swing` { id }); a hit that passes bonkRefusal (both out in the lane, close, nobody hit twice in
+    // a row) goes to the whole room as `bonk` { by, to, x, z (flight direction), fish (species
+    // stolen, "" = none), byName, toName }. The victim's client throws itself, drops its catch and
+    // answers `giveFish` { weight }; the attacker's carries the fish home.
+    swing: (client: Client, msg: unknown) => {
+      const a = this.state.players.get(client.sessionId);
+      if (!a) return;
+      const now = Date.now();
+      if (now - (this.lastSwing.get(client.sessionId) ?? 0) < BONK.cooldownMs) return;
+      this.lastSwing.set(client.sessionId, now);
+      this.broadcast("swing", { id: client.sessionId }, { except: client });
+      const to = (msg as { target?: unknown })?.target;
+      if (typeof to !== "string" || !to) return;
+      const t = this.state.players.get(to);
+      if (bonkRefusal(a, t, now, this.immuneUntil.get(to) ?? 0, to === client.sessionId) || !t) return;
+      this.immuneUntil.set(to, now + BONK.immuneMs);
+      const fish = t.hold;
+      if (fish) this.steals.set(to, { by: client.sessionId, species: fish, at: now });
+      t.hold = ""; // gone from their hands at once, so nobody else can take it on the way
+      t.knocked = true;
+      const dir = bonkDirection(a, t);
+      this.broadcast("bonk", { by: client.sessionId, to, x: dir.x, z: dir.z, fish, byName: a.username || "Player", toName: t.username || "Player" });
+    },
+    // The bonked player's answer: the weight of the fish just taken, sent on to the attacker as
+    // `gotFish` { species, weight, from }. Only for a steal made in the last BONK.giveMs.
+    giveFish: (client: Client, msg: unknown) => {
+      const s = this.steals.get(client.sessionId);
+      const weight = giveWeight(msg);
+      if (!s || weight === null) return;
+      this.steals.delete(client.sessionId);
+      if (Date.now() - s.at > BONK.giveMs) return;
+      const attacker = this.clients.find((c) => c.sessionId === s.by);
+      const from = this.state.players.get(client.sessionId)?.username || "Player";
+      try {
+        attacker?.send("gotFish", { species: s.species, weight, from });
+      } catch {
+        // Gone meanwhile.
+      }
     },
     // Re-states identity after a login/logout that happens AFTER join (a guest who signs in
     // mid-session). The server answers with progress/noProgress for the new identity.
@@ -148,7 +204,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }, LEADERBOARD_EVERY_MS);
   }
 
-  // `leaderboard` { boards: { rebirths|trophies|energy|playtime: [{ name, value }] }, ranks: { stat: n | null } }.
+  // `leaderboard` { boards: { income|caught|earned|playtime: [{ name, value }] }, ranks: { stat: n | null } }.
   private async sendLeaderboard(client: Client) {
     const userId = this.userIds.get(client.sessionId) ?? "";
     const [boards, ranks] = await Promise.all([topBoards(), ranksOf(userId)]);
@@ -160,10 +216,19 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }
   }
 
-  onJoin(client: Client, options?: { username?: string; userId?: string; pfp?: string; pose?: unknown; loadout?: unknown; avatar?: string }) {
+  onJoin(client: Client, options?: { username?: string; userId?: string; pfp?: string; pose?: unknown; loadout?: unknown; avatar?: string; base?: unknown }) {
     const p = new PlayerState();
     p.username = sanitizeName(options?.username);
     p.pfp = sanitizePfp(options?.pfp);
+    // The player's own plot: the one they asked for if it is free, else the lowest free one. A plot
+    // held by this same account's older session (a reload still inside its reconnect window) counts
+    // as free: setUserId evicts that session right after, so a reload keeps its plot.
+    const me = typeof options?.userId === "string" && !options.userId.startsWith(GUEST_ID_PREFIX) ? options.userId.slice(0, UID_MAX_LEN) : "";
+    const taken = new Set<number>();
+    this.state.players.forEach((o, sid) => {
+      if (o.base >= 0 && !(me && this.userIds.get(sid) === me)) taken.add(o.base);
+    });
+    p.base = assignBase(taken, options?.base);
     // Presence from the join options, so the others draw the newcomer right away.
     applyPose(p, options?.pose);
     applyLoadout(p, options?.loadout);
@@ -188,6 +253,18 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }
   }
 
+  // The player is here now: offline time is counted from this moment on.
+  private async stampSeen(sessionId: string, at: number) {
+    const userId = this.userIds.get(sessionId);
+    const players = getPlayers();
+    if (!userId || !players) return;
+    try {
+      await players.updateOne({ _id: userId }, { $set: { lastSeen: at } });
+    } catch (err) {
+      console.warn("[WorldRoom] stampSeen failed", err);
+    }
+  }
+
   // Server-clock "last seen" for a player who has really gone. Call before forgetSession.
   private async stampLastSeen(sessionId: string) {
     const userId = this.userIds.get(sessionId);
@@ -200,7 +277,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }
   }
 
-  // Drops a session's per-connection bookkeeping.
+  // Drops a session's per-connection bookkeeping: its plot is free again (it leaves the roster).
   private forgetSession(sessionId: string) {
     this.state.players.delete(sessionId);
     this.userIds.delete(sessionId);
@@ -208,6 +285,9 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.loaded.delete(sessionId);
     this.dailies.delete(sessionId);
     this.spinStates.delete(sessionId);
+    this.lastSwing.delete(sessionId);
+    this.immuneUntil.delete(sessionId);
+    this.steals.delete(sessionId);
   }
 
   private spinView(s: SpinState, now: number) {
@@ -253,7 +333,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   // only read/overwrite the SENDER's own save (there is no cross-player read in `saveProgress`).
   // Called from both onJoin and `identify`; answers with progress / noProgress / serverError.
   private setUserId(client: Client, p: PlayerState, raw: string) {
-    let userId = raw.slice(0, 128);
+    let userId = raw.slice(0, UID_MAX_LEN);
     // Guests (client-made `guest-...` ids) get no identity: nothing is loaded or saved for them.
     if (userId.startsWith(GUEST_ID_PREFIX)) userId = "";
     const prev = this.userIds.get(client.sessionId) || "";
@@ -263,6 +343,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.loaded.delete(client.sessionId); // no writes until the new identity's save is read
     this.spinStates.delete(client.sessionId); // nor spins
     p.signedIn = !!userId;
+    p.uid = userId;
 
     if (userId) {
       // Evict any OTHER live session already claiming this account, so one account never has
@@ -313,7 +394,18 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     const spin = spinStateFrom(doc, now);
     this.spinStates.set(client.sessionId, spin);
     if (!doc) client.send("noProgress", { serverTime: now });
-    else client.send("progress", { ...(sanitizeProgress(doc) ?? {}), serverTime: now });
+    else {
+      // Offline Money: what the active fish earned while the player was away (income x OFFLINE_RATE x
+      // time since last seen, capped). The client adds it; the stamp below makes sure it is counted only once.
+      const away = doc.lastSeen ? Math.min(OFFLINE_MAX_SECONDS, Math.max(0, (now - doc.lastSeen) / 1000)) : 0;
+      const offline = Math.floor((doc.income ?? 0) * OFFLINE_RATE * away);
+      client.send("progress", { ...(sanitizeProgress(doc) ?? {}), offline, away: Math.floor(away), serverTime: now });
+      await this.stampSeen(client.sessionId, now);
+      // Left, or switched identity, during the stamp: that identity's own load answers instead.
+      if (this.spinStates.get(client.sessionId) !== spin) return;
+    }
+    // HUD countdowns on the server clock: the client counts against serverTime, not its own clock.
+    client.send("schedule", { eventEveryMs: EVENT_EVERY_MS, updateAt: UPDATE_AT_MS, serverTime: now });
     client.send("spins", this.spinView(spin, now));
 
     // Daily Reward: today's day unlocks on join (server clock), then the client gets the calendar.

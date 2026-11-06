@@ -1,8 +1,8 @@
 import { LEADERBOARD_EVERY_MS, LEADERBOARD_SIZE, LEADERBOARD_STATS, type LeaderboardStat } from "./constants.js";
 import { getPlayers } from "./db.js";
 
-// The plaza's four leaderboard boards (client plaza.js): the top LEADERBOARD_SIZE saved players by
-// rebirths, Wins (trophies), Power (energy) and playtime, read from every saved doc. The top lists
+// The hub's leaderboard boards (client LEADERBOARD): the top LEADERBOARD_SIZE saved players by
+// income ($/s), fish caught, money earned and playtime, read from every saved doc. The top lists
 // are one shared cache per process (every room reads it), refreshed at most every
 // LEADERBOARD_EVERY_MS; each player's own rank is counted per refresh. Guests are never saved, so
 // they never appear (their rank is null).

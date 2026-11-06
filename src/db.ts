@@ -11,31 +11,25 @@ import { LEADERBOARD_STATS } from "./constants.js";
 export interface PlayerDoc {
   _id: string; // Bloxity user id -- see WorldRoom.ts (guests are never saved)
   username?: string; // display name as of the last save
-  trophies?: number; // Wins (the HUD's trophy counter, the shop currency)
+  money?: number; // the HUD's $ counter
   gems?: number;
-  energy?: number; // lightning (rebirth.js), the race speed
-  rebirths?: number;
-  autoRebirth?: boolean;
-  bestDistance?: number; // personal best race, studs (only ever goes up)
+  trained?: number; // trained speed stat (the plot treadmill; the trail multiplies it)
+  treadmill?: number; // treadmill level, 1..LEVEL_MAX
+  baseLevel?: number; // base level (client BASE.levels: pond slots + the plot's look), 1..LEVEL_MAX
+  slots?: number; // active fish slots
+  fish?: SavedFish[]; // the backpack, at most FISH_MAX
+  rods?: string[]; // owned rod ids
+  rod?: string; // the equipped rod (an owned one), "" = none
+  trails?: string[]; // owned trail ids (client TRAILS)
+  trail?: string; // the equipped trail (an owned one), "" = none
+  unlocked?: string[]; // species ever caught (the index)
+  claimed?: string[]; // species whose index reward was taken
+  income?: number; // current $/s of the active fish (Offline Money = this x OFFLINE_RATE x seconds away)
+  // Lifetime counters (leaderboards): written with $max, so a stale save never lowers them.
+  caught?: number; // fish caught
+  earned?: number; // money earned
   playtime?: number; // s with the game visible
-  boats?: string[]; // owned boat ids (client BOATS.list)
-  boat?: string; // the equipped boat (an owned one)
-  engines?: string[]; // owned engine ids (client engine.js ENGINES)
-  engine?: string; // the equipped engine, "" = none
-  partners?: string[]; // owned partner ids (client PARTNER.partners)
-  partner?: string; // the equipped partner, "" = none
-  trails?: string[]; // owned trail ids (client TRAILS.list)
-  trail?: string; // the equipped trail, "" = none
-  pets?: SavedPet[]; // owned pets (client pets.js), at most PETS_MAX
-  petSlots?: number; // pets equipped at once
-  petStorage?: number; // pets owned at most
-  eggsSeen?: string[]; // pet kinds ever hatched (client eggs.js: the NEW! tag)
-  world?: string; // the world the player was in (client worlds.js WORLDS), "" = the start world
-  worldsUnlocked?: string[]; // worlds whose portal requirement was met once (they stay open)
-  giftTime?: number; // Online Gifts clock, s online this round
-  giftsClaimed?: number[]; // GIFTS.list indexes claimed this round
-  potions?: Record<string, number>; // potion id -> count (gifts.js)
-  lastSeen?: number; // epoch ms of the last activity
+  lastSeen?: number; // epoch ms of the last activity (the server stamps it: on load, on every save and when the player leaves)
   // Spin wheel (spin.ts): written only by the server's `spin` handler, never by saveProgress.
   spins?: number; // spins ready to use
   spinAt?: number; // epoch ms the next free spin arrives
@@ -47,12 +41,15 @@ export interface PlayerDoc {
   updatedAt: Date;
 }
 
-// One owned pet: its kind (client PETS.kinds key) and craft tier (index into PETS.tiers).
-export interface SavedPet {
-  kind: string;
-  tier: number;
+// One backpack fish (client activeFish.js): its species (client FISH key), weight (kg), income
+// ($/s while active), mutation ("" = none), and whether it is active / on the hotbar.
+export interface SavedFish {
+  species: string;
+  weight: number;
+  earn: number;
+  mutation: string;
   equipped: boolean;
-  locked: boolean;
+  hotbar: boolean;
 }
 
 let client: MongoClient | null = null;
