@@ -80,7 +80,7 @@ export const GUEST_ID_PREFIX = "guest-";
 // HUD countdowns (client hud.js): "Next event in ..." repeats every EVENT_EVERY_MS on the server's
 // UTC clock (aligned to the epoch, so every player and every reload sees the same time left);
 // "UPDATE IN ..." counts down to UPDATE_AT_MS. Both are sent in the `schedule` message.
-export const EVENT_EVERY_MS = 3 * 60 * 60 * 1000;
+export const EVENT_EVERY_MS = 5 * 60 * 60 * 1000;
 export const UPDATE_AT_MS = Date.parse("2026-11-13T17:00:00Z");
 
 // Bloxity's own trophy boards (platformBoards.ts; the client's LEADERBOARDS in config.js declares
