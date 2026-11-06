@@ -40,7 +40,7 @@ describe("spin wheel", () => {
   });
 
   it("spends a spin, rolls the prize on the server and saves the count", async () => {
-    const fake = fakePlayers([{ _id: "s1", trophies: 5, spins: 2, spinAt: Date.now() + 60_000, version: 1, updatedAt: new Date() }]);
+    const fake = fakePlayers([{ _id: "s1", money: 5, spins: 2, spinAt: Date.now() + 60_000, version: 1, updatedAt: new Date() }]);
     __setPlayersForTest(fake);
     const room = await colyseus.createRoom<WorldState>("world", {});
     const c = await colyseus.connectTo(room, { userId: "s1" });
@@ -64,7 +64,7 @@ describe("spin wheel", () => {
     assert.strictEqual(got[1].spins, 0);
     assert.deepStrictEqual([got[2].ok, got[2].reason], [false, "none"]);
     assert.strictEqual(fake.docs.get("s1")?.spins, 0);
-    assert.strictEqual(fake.docs.get("s1")?.trophies, 5, "the rest of the save is untouched");
+    assert.strictEqual(fake.docs.get("s1")?.money, 5, "the rest of the save is untouched");
 
     // A client save can't hand itself spins.
     c.send("saveProgress", { spins: 99, spinAt: 0 });

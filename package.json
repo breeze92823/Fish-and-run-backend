@@ -1,8 +1,8 @@
 {
   "private": true,
-  "name": "boat-race-with-99-engine-server",
+  "name": "fish-and-run-server",
   "version": "0.1.0",
-  "description": "Colyseus server for Boat Race with 99 Engine: progress saving and the room roster",
+  "description": "Colyseus server for Fish and Run: saves, plots, presence and leaderboards",
   "type": "module",
   "main": "build/index.js",
   "engines": {
